@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Vakta — Voice Ledger</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            ink: "#0b1220",
+            card: "#121a2b",
+            glow: "#22d3ee",
+            accent: "#f59e0b",
+          },
+        },
+      },
+    };
+  </script>
+  <style>
+    @keyframes pulse-ring {
+      0% { transform: scale(1); opacity: 0.7; }
+      70% { transform: scale(1.35); opacity: 0; }
+      100% { transform: scale(1.35); opacity: 0; }
+    }
+    .mic-ring::before,
+    .mic-ring::after {
+      content: "";
+      position: absolute;
+      inset: -10px;
+      border-radius: 9999px;
+      border: 2px solid #22d3ee;
+      animation: pulse-ring 1.8s ease-out infinite;
+    }
+    .mic-ring::after { animation-delay: 0.6s; }
+    body { -webkit-tap-highlight-color: transparent; }
+  </style>
+</head>
+<body class="bg-ink text-slate-100 min-h-screen">
+  <main class="mx-auto max-w-md px-4 pb-16 pt-6">
+    <header class="mb-6">
+      <p class="text-xs uppercase tracking-[0.25em] text-cyan-300">Voice-first</p>
+      <h1 class="text-3xl font-black leading-tight">Vakta</h1>
+      <p class="mt-1 text-sm text-slate-400">Bolke likho. Tiffin, mechanic, kirana — Hinglish chalega.</p>
+    </header>
+
+    <section class="rounded-3xl bg-card p-5 shadow-xl shadow-cyan-500/10 ring-1 ring-white/10">
+      <p id="status" class="text-center text-sm font-semibold text-cyan-200">Tap to record</p>
+      <p id="hint" class="mt-1 text-center text-xs text-slate-400">Hold to speak, or tap once to start and again to stop</p>
+
+      <div class="mt-6 flex justify-center">
+        <button id="micBtn" type="button"
+          class="relative h-36 w-36 rounded-full bg-gradient-to-b from-cyan-300 to-cyan-600 text-ink shadow-[0_0_40px_rgba(34,211,238,0.45)] active:scale-95 transition"
+          aria-label="Hold to speak">
+          <span class="relative z-10 text-5xl">🎙️</span>
+        </button>
+      </div>
+      <p class="mt-4 text-center text-xs text-slate-500">Microphone stays on this phone. Audio goes to Sarvam STT.</p>
+    </section>
+
+    <p id="banner" class="mt-4 hidden rounded-2xl bg-amber-500/15 px-4 py-3 text-sm text-amber-200 ring-1 ring-amber-400/30"></p>
+
+    <section id="intentCard" class="mt-5 hidden rounded-3xl bg-card p-5 ring-1 ring-white/10">
+      <div class="flex items-center justify-between">
+        <h2 class="text-lg font-bold">Parsed intent</h2>
+        <span id="mockBadge" class="hidden rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] uppercase tracking-wide text-amber-300">Mock</span>
+      </div>
+      <p id="transcript" class="mt-2 text-sm text-slate-300"></p>
+      <dl class="mt-4 grid grid-cols-2 gap-3 text-sm">
+        <div class="rounded-2xl bg-ink/60 p-3"><dt class="text-xs text-slate-400">Customer</dt><dd id="fCustomer" class="font-semibold break-words">—</dd></div>
+        <div class="rounded-2xl bg-ink/60 p-3"><dt class="text-xs text-slate-400">Item / service</dt><dd id="fItem" class="font-semibold break-words">—</dd></div>
+        <div class="rounded-2xl bg-ink/60 p-3"><dt class="text-xs text-slate-400">Time slot</dt><dd id="fTime" class="font-semibold">—</dd></div>
+        <div class="rounded-2xl bg-ink/60 p-3"><dt class="text-xs text-slate-400">Payment</dt><dd id="fPay" class="font-semibold">—</dd></div>
+        <div class="col-span-2 rounded-2xl bg-ink/60 p-3"><dt class="text-xs text-slate-400">Amount</dt><dd id="fAmt" class="font-semibold">—</dd></div>
+      </dl>
+      <div class="mt-4 grid gap-2">
+        <button id="btnWhatsapp" type="button" class="min-h-12 rounded-2xl bg-emerald-500 px-4 py-3 text-sm font-bold text-ink">Send WhatsApp confirmation</button>
+        <button id="btnTts" type="button" class="min-h-12 rounded-2xl bg-cyan-500 px-4 py-3 text-sm font-bold text-ink">Play voice note preview</button>
+        <button id="btnLedger" type="button" class="min-h-12 rounded-2xl bg-accent px-4 py-3 text-sm font-bold text-ink">Log to voice ledger</button>
+      </div>
+    </section>
+
+    <section class="mt-6">
+      <h2 class="mb-3 text-lg font-bold">Today’s ledger</h2>
+      <div id="ledger" class="space-y-2"></div>
+    </section>
+  </main>
+
+  <script>
+    const statusEl = document.getElementById("status");
+    const hintEl = document.getElementById("hint");
+    const micBtn = document.getElementById("micBtn");
+    const banner = document.getElementById("banner");
+    const intentCard = document.getElementById("intentCard");
+    const mockBadge = document.getElementById("mockBadge");
+    let mediaRecorder = null;
+    let chunks = [];
+    let recording = false;
+    let holdMode = false;
+    let lastIntent = null;
+
+    function setStatus(text, listening) {
+      statusEl.textContent = text;
+      micBtn.classList.toggle("mic-ring", !!listening);
+    }
+
+    function showBanner(msg) {
+      if (!msg) {
+        banner.classList.add("hidden");
+        banner.textContent = "";
+        return;
+      }
+      banner.textContent = msg;
+      banner.classList.remove("hidden");
+    }
+
+    function pickMime() {
+      const types = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg"];
+      return types.find((t) => MediaRecorder.isTypeSupported(t)) || "";
+    }
+
+    async function startRecording() {
+      if (recording) return;
+      showBanner("");
+      chunks = [];
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const mimeType = pickMime();
+        mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+        mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+        mediaRecorder.onstop = () => {
+          stream.getTracks().forEach((t) => t.stop());
+          processBlob(new Blob(chunks, { type: mediaRecorder.mimeType || "audio/webm" }));
+        };
+        mediaRecorder.start();
+        recording = true;
+        setStatus("Listening...", true);
+        hintEl.textContent = "Release or tap again to stop";
+      } catch (err) {
+        const denied = err && (err.name === "NotAllowedError" || err.name === "PermissionDeniedError");
+        showBanner(denied
+          ? "Microphone permission denied. Allow mic access in the browser and try again."
+          : "Could not open the microphone on this device.");
+        setStatus("Mic blocked", false);
+      }
+    }
+
+    function stopRecording() {
+      if (!recording || !mediaRecorder || mediaRecorder.state === "inactive") return;
+      recording = false;
+      mediaRecorder.stop();
+      setStatus("Processing via Sarvam AI...", false);
+      hintEl.textContent = "Transcribing + extracting the order";
+    }
+
+    async function processBlob(blob) {
+      if (!blob || blob.size < 200) {
+        showBanner("Empty audio buffer. Hold the mic a little longer and speak clearly.");
+        setStatus("Tap to record", false);
+        hintEl.textContent = "Hold to speak, or tap once to start and again to stop";
+        return;
+      }
+      const form = new FormData();
+      const ext = (blob.type || "").includes("mp4") ? "m4a" : (blob.type || "").includes("ogg") ? "ogg" : "webm";
+      form.append("audio", blob, "voice." + ext);
+      try {
+        const res = await fetch("/api/process-voice", { method: "POST", body: form });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Voice processing failed");
+        lastIntent = data;
+        renderIntent(data);
+        const warn = (data.warnings || []).join(" ");
+        showBanner(warn || "");
+        setStatus("Action Complete!", false);
+      } catch (err) {
+        showBanner(err.message || "Could not reach Vakta backend.");
+        setStatus("Try again", false);
+      }
+      hintEl.textContent = "Hold to speak, or tap once to start and again to stop";
+    }
+
+    function dash(v) { return (v && String(v).trim()) ? v : "—"; }
+
+    function renderIntent(data) {
+      intentCard.classList.remove("hidden");
+      mockBadge.classList.toggle("hidden", !data.used_mock);
+      document.getElementById("transcript").textContent = data.transcript || "";
+      document.getElementById("fCustomer").textContent = dash(data.customer_name);
+      document.getElementById("fItem").textContent = dash(data.service_item);
+      document.getElementById("fTime").textContent = dash(data.time_slot);
+      document.getElementById("fPay").textContent = dash(data.payment_status);
+      document.getElementById("fAmt").textContent = dash(data.amount);
+    }
+
+    function confirmationText(data) {
+      return data.confirmation_message || ("Order confirm: " + (data.service_item || "") + " — " + (data.customer_name || ""));
+    }
+
+    document.getElementById("btnWhatsapp").addEventListener("click", () => {
+      if (!lastIntent) return;
+      const msg = confirmationText(lastIntent);
+      window.open("https://wa.me/?text=" + encodeURIComponent(msg), "_blank");
+    });
+
+    document.getElementById("btnTts").addEventListener("click", async () => {
+      if (!lastIntent) return;
+      setStatus("Processing via Sarvam AI...", false);
+      try {
+        const res = await fetch("/api/generate-audio", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text: confirmationText(lastIntent),
+            language_code: lastIntent.language_code || "hi-IN",
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "TTS failed");
+        const audio = new Audio("data:" + (data.mime_type || "audio/wav") + ";base64," + data.audio_base64);
+        await audio.play();
+        setStatus("Action Complete!", false);
+      } catch (err) {
+        showBanner(err.message || "Could not play Bulbul audio.");
+        setStatus("TTS failed", false);
+      }
+    });
+
+    document.getElementById("btnLedger").addEventListener("click", async () => {
+      if (!lastIntent) return;
+      try {
+        const res = await fetch("/api/ledger", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            customer_name: lastIntent.customer_name || "",
+            service_item: lastIntent.service_item || "",
+            time_slot: lastIntent.time_slot || "",
+            payment_status: lastIntent.payment_status || "unknown",
+            amount: lastIntent.amount || "",
+            transcript: lastIntent.transcript || "",
+            confirmation_message: lastIntent.confirmation_message || "",
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Could not save ledger");
+        setStatus("Action Complete!", false);
+        await loadLedger();
+      } catch (err) {
+        showBanner(err.message);
+      }
+    });
+
+    async function loadLedger() {
+      const res = await fetch("/api/ledger");
+      const data = await res.json();
+      const box = document.getElementById("ledger");
+      if (!data.entries || !data.entries.length) {
+        box.innerHTML = '<p class="rounded-2xl bg-card px-4 py-6 text-sm text-slate-400 ring-1 ring-white/10">No voice logs yet. Record an order to fill this table.</p>';
+        return;
+      }
+      box.innerHTML = data.entries.map((e) => `
+        <article class="rounded-2xl bg-card p-4 ring-1 ring-white/10">
+          <div class="flex items-start justify-between gap-2">
+            <p class="font-bold">${escapeHtml(e.customer_name || "Customer")}</p>
+            <p class="text-accent font-semibold">${escapeHtml(e.amount ? "₹" + e.amount : "")}</p>
+          </div>
+          <p class="text-sm text-slate-300">${escapeHtml(e.service_item || "")}</p>
+          <p class="mt-1 text-xs text-slate-500">${escapeHtml(e.time_slot || "")} · ${escapeHtml(e.payment_status || "")}</p>
+        </article>
+      `).join("");
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    }
+
+    micBtn.addEventListener("pointerdown", (e) => {
+      holdMode = true;
+      micBtn.setPointerCapture(e.pointerId);
+      startRecording();
+    });
+    micBtn.addEventListener("pointerup", () => {
+      if (holdMode && recording) stopRecording();
+      holdMode = false;
+    });
+    micBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+    });
+
+    loadLedger();
+  </script>
+</body>
+</html>
